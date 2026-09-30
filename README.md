@@ -29,7 +29,26 @@ Docker'а на ноутбуке нет? Тогда локально работа
 | `make lint` | проверить синтаксис PHP |
 | `make down` | остановить сервис |
 | `make seed` | перезалить учебные данные |
+| `make ps` | состояние контейнеров |
+| `make logs` | логи backend |
 | `make help` | список всех команд |
+
+## Как проверить, что сервис жив
+
+После `make up` сервис слушает на `http://localhost:${APP_PORT:-8080}` (порт снаружи
+переопределяется переменной `APP_PORT` — на стенде её задаёт ведущий).
+
+```bash
+make ps                              # оба контейнера (backend, db) в статусе Up/healthy
+curl -sS http://localhost:8080/health  # {"status":"ok"} — отвечает сам PHP-сервер
+curl -sS http://localhost:8080/        # форма отдаётся фронтом
+
+make logs                             # логи backend,Ctrl+C — выход
+```
+
+Если `/health` не отвечает, смотрите `make logs` — там будет причина (чаще всего backend
+ещё не дождался `db` по `depends_on: condition: service_healthy`, подождите пару секунд
+и повторите).
 
 ## API
 
