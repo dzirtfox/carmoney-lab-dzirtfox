@@ -21,6 +21,11 @@ return [
         'min_year' => 1990,
         'max_age_years' => 20,
         'max_mileage_km' => 500000,
+        /**
+         * Порог пробега для ручной проверки (км):
+         *   mileage > review_max_mileage_km -> approve понижается до review
+         */
+        'review_max_mileage_km' => 400000,
     ],
 
     'amount' => [
