@@ -4,13 +4,27 @@ declare(strict_types=1);
 
 namespace CarMoneyLab\Repository;
 
+use CarMoneyLab\Domain\DuplicateActiveApplicationException;
 use PDO;
+use PDOException;
 
 /**
  * Хранение заявок, автомобилей и решений.
  */
 final class ApplicationRepository
 {
+    /**
+     * SQLSTATE нарушения уникальности в MySQL 8.
+     * Для внешнего ключа это 23001, поэтому от других ошибок не спутать.
+     */
+    private const UNIQUE_VIOLATION_SQLSTATE = '23000';
+
+    /** Имя ключа из db/schema.sql и db/migrations/002_active_application_unique.sql */
+    private const ACTIVE_REF_INDEX = 'uq_applications_active_ref';
+
+    /** Статус закрытой заявки; активной считается любая другая (решение B1). */
+    private const STATUS_CLOSED = 'cancelled';
+
     public function __construct(private readonly PDO $pdo)
     {
     }
@@ -18,46 +32,87 @@ final class ApplicationRepository
     /**
      * @param array{vin:string,year:int,mileage:int,market_value:int,requested_amount:int,term_months:int} $input
      * @param array{ltv:float,decision:string,approved_limit:int} $assessment
+     * @throws DuplicateActiveApplicationException у клиента уже есть активная заявка
      */
     public function save(string $applicantRef, array $input, array $assessment): int
     {
+        try {
+            $statement = $this->pdo->prepare(
+                'INSERT INTO applications (applicant_ref, requested_amount, term_months, status)
+                 VALUES (:applicant_ref, :amount, :term, :status)'
+            );
+            $statement->execute([
+                ':applicant_ref' => $applicantRef,
+                ':amount' => $input['requested_amount'],
+                ':term' => $input['term_months'],
+                ':status' => 'decided',
+            ]);
+
+            $applicationId = (int) $this->pdo->lastInsertId();
+
+            $vehicle = $this->pdo->prepare(
+                'INSERT INTO vehicles (application_id, vin, production_year, mileage_km, market_value)
+                 VALUES (:application_id, :vin, :year, :mileage, :market_value)'
+            );
+            $vehicle->execute([
+                ':application_id' => $applicationId,
+                ':vin' => $input['vin'],
+                ':year' => $input['year'],
+                ':mileage' => $input['mileage'],
+                ':market_value' => $input['market_value'],
+            ]);
+
+            $decision = $this->pdo->prepare(
+                'INSERT INTO decisions (application_id, ltv, decision, approved_limit)
+                 VALUES (:application_id, :ltv, :decision, :approved_limit)'
+            );
+            $decision->execute([
+                ':application_id' => $applicationId,
+                ':ltv' => $assessment['ltv'],
+                ':decision' => $assessment['decision'],
+                ':approved_limit' => $assessment['approved_limit'],
+            ]);
+        } catch (PDOException $exception) {
+            // Отказ приходит на первом же INSERT, поэтому half-записанной заявки не остаётся.
+            if (self::isActiveSlotTaken($exception)) {
+                throw new DuplicateActiveApplicationException($applicantRef, $exception);
+            }
+
+            throw $exception;
+        }
+
+        return $applicationId;
+    }
+
+    /**
+     * Есть ли у клиента активная заявка — только чтение сохранённого состояния.
+     *
+     * НЕ использовать как pre-check перед save(): между такой проверкой и вставкой
+     * другая транзакция успеет занять слот, поэтому гонку ловит только UNIQUE-индекс
+     * uq_applications_active_ref (см. save()). Метод нужен для тестов и чтения
+     * состояния — карточка клиента, отчёт, разбор спорной заявки, — а не для защиты
+     * от повторной заявки.
+     */
+    public function hasActiveApplication(string $applicantRef): bool
+    {
         $statement = $this->pdo->prepare(
-            'INSERT INTO applications (applicant_ref, requested_amount, term_months, status)
-             VALUES (:applicant_ref, :amount, :term, :status)'
+            'SELECT 1 FROM applications
+              WHERE applicant_ref = :applicant_ref AND status <> :closed
+              LIMIT 1'
         );
         $statement->execute([
             ':applicant_ref' => $applicantRef,
-            ':amount' => $input['requested_amount'],
-            ':term' => $input['term_months'],
-            ':status' => 'decided',
+            ':closed' => self::STATUS_CLOSED,
         ]);
 
-        $applicationId = (int) $this->pdo->lastInsertId();
+        return $statement->fetchColumn() !== false;
+    }
 
-        $vehicle = $this->pdo->prepare(
-            'INSERT INTO vehicles (application_id, vin, production_year, mileage_km, market_value)
-             VALUES (:application_id, :vin, :year, :mileage, :market_value)'
-        );
-        $vehicle->execute([
-            ':application_id' => $applicationId,
-            ':vin' => $input['vin'],
-            ':year' => $input['year'],
-            ':mileage' => $input['mileage'],
-            ':market_value' => $input['market_value'],
-        ]);
-
-        $decision = $this->pdo->prepare(
-            'INSERT INTO decisions (application_id, ltv, decision, approved_limit)
-             VALUES (:application_id, :ltv, :decision, :approved_limit)'
-        );
-        $decision->execute([
-            ':application_id' => $applicationId,
-            ':ltv' => $assessment['ltv'],
-            ':decision' => $assessment['decision'],
-            ':approved_limit' => $assessment['approved_limit'],
-        ]);
-
-        return $applicationId;
+    /** Нарушение уникальности именно по слоту активной заявки, а не по другой причине. */
+    private static function isActiveSlotTaken(PDOException $exception): bool
+    {
+        return (string) $exception->getCode() === self::UNIQUE_VIOLATION_SQLSTATE
+            && str_contains($exception->getMessage(), self::ACTIVE_REF_INDEX);
     }
 
     /** @return array<string,mixed> пустой массив, если заявки нет */
@@ -81,6 +136,11 @@ final class ApplicationRepository
 
     /**
      * Список заявок для оператора.
+     *
+     * Сгенерированную active_ref в ответе намеренно нет: клиенту API она ничего не
+     * даёт, а будущий SELECT * мог бы вытащить служебную колонку. Идентификатор
+     * клиента и статус в списке есть, а вопрос «есть ли активная заявка» закрывает
+     * hasActiveApplication().
      *
      * @return list<array<string,mixed>>
      */

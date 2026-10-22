@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CarMoneyLab\Http;
 
 use CarMoneyLab\Domain\AssessmentService;
+use CarMoneyLab\Domain\DuplicateActiveApplicationException;
 use CarMoneyLab\Domain\ValidationException;
 use CarMoneyLab\Repository\ApplicationRepository;
 use CarMoneyLab\Support\Json;
@@ -30,8 +31,18 @@ final class ApplicationController
             return Json::write($response, ['errors' => $exception->errors()], 422);
         }
 
+        // applicant_ref не валидируется, поэтому заявки без этого поля получают один
+        // общий идентификатор CL-ANON: у такого клиента может быть только одна активная
+        // заявка, и она держит слот до отмены. Само поле здесь не меняем (это меняет
+        // контракт и вне объёма фичи), риск зафиксирован в docs/plan/plan_DUP_ACTIVE.md.
         $applicantRef = (string) ($payload['applicant_ref'] ?? 'CL-ANON');
-        $id = $this->repository->save($applicantRef, $result['input'], $result);
+
+        try {
+            $id = $this->repository->save($applicantRef, $result['input'], $result);
+        } catch (DuplicateActiveApplicationException $exception) {
+            // Ключ errors читает фронт (frontend/app.js), поэтому тело — такой же JSON, как у 422.
+            return Json::write($response, ['errors' => $exception->errors()], 409);
+        }
 
         error_log(sprintf(
             'application=%d ltv=%s decision=%s limit=%d',

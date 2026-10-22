@@ -8,7 +8,20 @@ CREATE TABLE IF NOT EXISTS applications (
     term_months     SMALLINT UNSIGNED NOT NULL,
     status          ENUM('new', 'decided', 'cancelled') NOT NULL DEFAULT 'new',
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Активная заявка (решение риск-менеджмента B1): status != 'cancelled'.
+    -- Для закрытой заявки active_ref = NULL, а NULL в UNIQUE не конфликтует,
+    -- поэтому закрытые заявки не мешают друг другу и клиенту.
+    -- Незакрытая заявка занимает единственный слот по applicant_ref: второй INSERT
+    -- получает SQLSTATE 23000 по ключу uq_applications_active_ref, который
+    -- ApplicationRepository::save() превращает в DuplicateActiveApplicationException,
+    -- а контроллер — в HTTP 409. Проверить наличие активной заявки без записи
+    -- можно через ApplicationRepository::hasActiveApplication().
+    active_ref      VARCHAR(32)
+                    GENERATED ALWAYS AS (IF(status = 'cancelled', NULL, applicant_ref)) STORED
+                    COMMENT 'дубликат applicant_ref для активной заявки, NULL для закрытой',
     PRIMARY KEY (id),
+    UNIQUE KEY uq_applications_active_ref (active_ref),
+    KEY idx_applications_applicant_ref (applicant_ref, status),
     KEY idx_applications_status (status)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
