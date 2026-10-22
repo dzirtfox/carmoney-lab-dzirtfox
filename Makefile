@@ -8,7 +8,7 @@ LOCAL_PHP := $(shell command -v php >/dev/null 2>&1 && command -v composer >/dev
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint install seed ps
+.PHONY: help up down logs test lint install seed migrate ps
 
 help: ## Показать список команд
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -50,3 +50,8 @@ endif
 
 seed: ## Перезалить учебные данные в уже поднятую базу
 	$(COMPOSE) exec -T db mysql -ulab -plab carmoney_lab < db/seed.sql
+
+migrate: ## Накатить миграцию 002 (одна активная заявка) на уже поднятую базу
+	$(COMPOSE) exec -T db mysql -ulab -plab carmoney_lab < db/migrations/002_active_application_unique.sql \
+		&& echo "Миграция 002 применена: uq_applications_active_ref на месте" \
+		|| (echo "Миграция 002 НЕ применена (см. ошибку выше: дубли активных заявок, повторный прогон или нет сервиса db)" >&2; exit 1)
